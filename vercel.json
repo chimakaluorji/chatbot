@@ -1,17 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/app.py": {
-      "runtime": "python3.9",
-      "maxDuration": 10
-    },
-    "api/train.py": {
-      "runtime": "python3.9",
-      "maxDuration": 300
-    }
-  },
-  "routes": [
-    { "src": "/api/app/(.*)", "dest": "api/app.py" },
-    { "src": "/api/train/(.*)", "dest": "api/train.py" }
-  ]
+  "builds": [{ "src": "app.py", "use": "@vercel/python" }],
+  "routes": [{ "src": "/(.*)", "dest": "app.py" }]
 }

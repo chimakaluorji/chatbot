@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 motor
-pymongo
-aiofiles
-python-dotenv
 openai
 textblob
+python-dotenv
+aiofiles
+requests
