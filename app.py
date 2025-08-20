@@ -6,24 +6,22 @@ import re
 from pathlib import Path
 from textblob import TextBlob
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from openai import OpenAI
 from bson import ObjectId
-from train import start_training, check_training_status  # ✅ import from train.py
-from fastapi import BackgroundTasks
+from train import start_training, check_training_status  # ✅ use train.py functions
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
-
 app = FastAPI()
 
 # ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, lock this down
+    allow_origins=["*"],  # 🔒 lock down in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,14 +36,12 @@ if not all([MONGO_USERNAME, MONGO_PASSWORD, MONGO_CLUSTER]):
     raise ValueError("❌ Missing MongoDB environment variables")
 
 MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
-
 client_mongo = AsyncIOMotorClient(MONGO_URI)
 db = client_mongo["chatbot"]
 whatsapp_collection = db["whatsapp_messages"]
 
 # ---------------- OPENAI ----------------
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-FINE_TUNED_MODEL_ID = os.getenv("FINE_TUNED_MODEL_ID")
 
 # ---------------- UTILS ----------------
 UPLOAD_DIR = Path("uploads")
@@ -117,28 +113,27 @@ async def upload_whatsapp(title: str = Form(...), file: UploadFile = File(...)):
 
 @app.get("/whatsapp")
 async def get_all_whatsapp():
-    chats = []
-    async for doc in whatsapp_collection.find():
-        doc["_id"] = str(doc["_id"])
-        chats.append(doc)
-    return chats
+    try:
+        docs = await whatsapp_collection.find().to_list(length=None)
+        for doc in docs:
+            doc["_id"] = str(doc["_id"])
+        return docs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching chats: {str(e)}")
 
-class ChatRequest(BaseModel):
-    id: str   # The document ID from Mongo
+# ---------------- CHAT ----------------
+class QueryRequest(BaseModel):
+    id: str
     message: str
-    
+
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
-    # 1. Find document in MongoDB
+async def chat_endpoint(req: QueryRequest):
     doc = await whatsapp_collection.find_one({"_id": ObjectId(req.id)})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+    if not doc or "FINE_TUNED_MODEL_ID" not in doc:
+        raise HTTPException(status_code=400, detail="No trained model available")
 
-    fine_tuned_model_id = doc.get("FINE_TUNED_MODEL_ID")
-    if not fine_tuned_model_id:
-        raise HTTPException(status_code=400, detail="No trained model available for this document")
+    model_id = doc["FINE_TUNED_MODEL_ID"]
 
-    # 2. Detect sentiment
     sentiment = detect_sentiment(req.message)
     system_prompt = (
         f"You are Chima’s WhatsApp auto-reply bot.\n"
@@ -146,9 +141,8 @@ async def chat_endpoint(req: ChatRequest):
         "Always produce new, natural, human-like responses.\n"
     )
 
-    # 3. Query OpenAI with this doc’s fine-tuned model
     resp = openai_client.chat.completions.create(
-        model=fine_tuned_model_id,
+        model=model_id,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": req.message}
@@ -156,44 +150,36 @@ async def chat_endpoint(req: ChatRequest):
         max_completion_tokens=200
     )
 
-    # 4. Return response
     return {
         "status": "success",
-        "doc_id": req.id,
         "sentiment": sentiment,
         "user_message": req.message,
         "bot_reply": resp.choices[0].message.content
     }
 
-
+# ---------------- TRAIN ----------------
 @app.post("/train/{doc_id}")
 async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
-    """
-    Start fine-tuning for a document.
-    Returns job_id immediately so client can poll status.
-    """
-    background_tasks.add_task(start_training, doc_id)
+    background_tasks.add_task(start_training, doc_id)  # ✅ non-blocking
     return {"status": "started", "doc_id": doc_id}
-
 
 @app.get("/train/status/{job_id}")
 async def get_training_status(job_id: str):
-    """
-    Poll fine-tuning job status by job_id.
-    """
-    try:
-        result = await check_training_status(job_id)
-        return result
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    result = await check_training_status(job_id)
+    return result
 
+# ---------------- AUTO REPLY ----------------
 @app.put("/patterns/{pattern_id}/autoreply")
 async def update_auto_reply(pattern_id: str, status: bool):
-    result = await whatsapp_collection.update_one(
-        {"_id": ObjectId(pattern_id)}, {"$set": {"autoReply": status}}
-    )
-    return {"success": result.modified_count == 1, "autoReply": status}
+    try:
+        result = await whatsapp_collection.update_one(
+            {"_id": ObjectId(pattern_id)},
+            {"$set": {"autoReply": status}}
+        )
+        return {"success": result.modified_count == 1, "autoReply": status}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update autoReply: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8001, reload=True)
