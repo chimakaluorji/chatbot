@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "functions": {
+    "api/app.py": {
+      "runtime": "python3.9",
+      "maxDuration": 10
+    },
+    "api/train.py": {
+      "runtime": "python3.9",
+      "maxDuration": 900
+    }
+  },
+  "routes": [
+    { "src": "/api/app/(.*)", "dest": "api/app.py" },
+    { "src": "/api/train/(.*)", "dest": "api/train.py" }
+  ]
+}

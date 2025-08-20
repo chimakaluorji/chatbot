@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+.env/
+*.db
+*.sqlite3
+*.Backup Files
+*.uploads
+*.processed_exports

@@ -1,0 +1,26 @@
+[
+  {
+    "role": "user",
+    "content": "I can't sleep this way biko"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  },
+  {
+    "role": "user",
+    "content": "Have you eaten?"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  },
+  {
+    "role": "user",
+    "content": "Come, let see"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  }
+]
