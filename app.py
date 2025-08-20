@@ -12,7 +12,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from openai import OpenAI
 from bson import ObjectId
-import requests
+from train import start_training, check_training_status  # ✅ import from train.py
+from fastapi import BackgroundTasks
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -140,10 +141,23 @@ async def chat_endpoint(req: QueryRequest):
     return {"status": "success", "sentiment": sentiment, "user_message": req.message, "bot_reply": resp.choices[0].message.content}
 
 @app.post("/train/{doc_id}")
-async def trigger_training(doc_id: str):
+async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
+    """
+    Start fine-tuning for a document.
+    Returns job_id immediately so client can poll status.
+    """
+    background_tasks.add_task(start_training, doc_id)
+    return {"status": "started", "doc_id": doc_id}
+
+
+@app.get("/train/status/{job_id}")
+async def get_training_status(job_id: str):
+    """
+    Poll fine-tuning job status by job_id.
+    """
     try:
-        resp = requests.post(f"http://127.0.0.1:8002/train/{doc_id}", timeout=5)
-        return resp.json()
+        result = await check_training_status(job_id)
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -156,4 +170,4 @@ async def update_auto_reply(pattern_id: str, status: bool):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8001, reload=True)
+    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)

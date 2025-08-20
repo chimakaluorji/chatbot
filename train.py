@@ -1,39 +1,32 @@
 # train.py
 import os
-import re
 import json
-import time
 from bson import ObjectId
-from textblob import TextBlob
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from openai import OpenAI
-from fastapi import FastAPI, BackgroundTasks
+from textblob import TextBlob  # ✅ for sentiment
 
-# ---------------- LOAD ENV ----------------
 load_dotenv()
-app = FastAPI()
 
-# ---------------- MONGO ----------------
-MONGO_USERNAME = "ecomUser"
-MONGO_PASSWORD = "Chimakalu0rji"
-MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}@cluster0.zd4jdqg.mongodb.net/?retryWrites=true&w=majority"
+# ---------------- MONGO CONNECTION ----------------
+MONGO_URI = os.getenv("MONGO_URI")
 client_mongo = AsyncIOMotorClient(MONGO_URI)
 db = client_mongo["chatbot"]
 whatsapp_collection = db["whatsapp_messages"]
 
-# ---------------- OPENAI ----------------
+# ---------------- OPENAI CLIENT ----------------
 client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------- SENTIMENT ----------------
-def detect_sentiment(message):
+def detect_sentiment(message: str):
     polarity = TextBlob(message).sentiment.polarity
     return "positive" if polarity > 0.2 else "negative" if polarity < -0.2 else "neutral"
 
 # ---------------- JSONL CREATION ----------------
-def prepare_jsonl_from_db(messages, jsonl_file):
+def prepare_jsonl_from_db(messages, jsonl_file: str):
     data = []
-    for msg in messages:
+    for msg in messages:  # expects flattened [system, user, assistant]
         incoming = msg[1]["content"] if len(msg) > 1 else ""
         reply = msg[2]["content"] if len(msg) > 2 else ""
         sentiment = detect_sentiment(incoming)
@@ -59,51 +52,42 @@ def prepare_jsonl_from_db(messages, jsonl_file):
 
     return jsonl_file
 
-# ---------------- TRAINING ----------------
+# ---------------- START TRAINING ----------------
 async def start_training(doc_id: str):
-    jsonl_file = "whatsapp_finetune.jsonl"
-
-    if os.path.exists(jsonl_file):
-        os.remove(jsonl_file)
-
     doc = await whatsapp_collection.find_one({"_id": ObjectId(doc_id)})
-    if not doc or "messages" not in doc or not doc["messages"]:
-        return {"error": "No messages to train on"}
+    if not doc or "messages" not in doc:
+        return {"error": "No training data found"}
 
+    jsonl_file = "whatsapp_finetune.jsonl"
     prepare_jsonl_from_db(doc["messages"], jsonl_file)
 
+    # ✅ Upload training file
     with open(jsonl_file, "rb") as f:
         uploaded = client_openai.files.create(file=f, purpose="fine-tune")
 
+    # ✅ Start fine-tuning
     job = client_openai.fine_tuning.jobs.create(
         training_file=uploaded.id,
         model="gpt-4.1-nano-2025-04-14"
     )
-    print(f"🚀 Fine-tune started! Job ID: {job.id}")
 
-    while True:
-        status_data = client_openai.fine_tuning.jobs.retrieve(job.id)
-        status = status_data.status
-        print(f"⏳ Status: {status}")
-        if status in ["succeeded", "failed", "cancelled"]:
-            break
-        time.sleep(10)  # Poll every 10s for Vercel timeout safety
+    # ✅ Save job_id in MongoDB
+    await whatsapp_collection.update_one(
+        {"_id": ObjectId(doc_id)},
+        {"$set": {"fine_tune_job_id": job.id}}
+    )
 
-    if os.path.exists(jsonl_file):
-        os.remove(jsonl_file)
+    return {"status": "started", "job_id": job.id}
 
-    if status_data.status == "succeeded":
-        model_id = status_data.fine_tuned_model
-        await whatsapp_collection.update_one({"_id": ObjectId(doc_id)}, {"$set": {"FINE_TUNED_MODEL_ID": model_id}})
-        return {"status": "success", "model_id": model_id}
-    else:
-        return {"status": "failed", "job_status": status}
-
-@app.post("/train/{doc_id}")
-async def train_endpoint(doc_id: str, background_tasks: BackgroundTasks):
-    background_tasks.add_task(start_training, doc_id)
-    return {"status": "started", "job_id": doc_id}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("train:app", host="127.0.0.1", port=8002, reload=True)
+# ---------------- CHECK STATUS ----------------
+async def check_training_status(job_id: str):
+    job = client_openai.fine_tuning.jobs.retrieve(job_id)
+    status = job.status
+    if status == "succeeded":
+        model_id = job.fine_tuned_model
+        await whatsapp_collection.update_one(
+            {"fine_tune_job_id": job_id},
+            {"$set": {"FINE_TUNED_MODEL_ID": model_id}}
+        )
+        return {"status": "succeeded", "model_id": model_id}
+    return {"status": status}
