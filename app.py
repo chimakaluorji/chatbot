@@ -12,7 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from openai import OpenAI
 from bson import ObjectId
-from train import start_training, check_training_status  # ✅ import from train.py
+from train import start_training, check_training_status  # ✅ import training helpers
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -22,26 +22,31 @@ app = FastAPI()
 # ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ In production, restrict this
+    allow_origins=["*"],  # ⚠️ Restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- MONGO (initialized on startup) ----------------
+# ---------------- MONGO ----------------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     MONGO_USERNAME = os.getenv("MONGO_USERNAME")
     MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")
     MONGO_CLUSTER = os.getenv("MONGO_CLUSTER")
+
     if not all([MONGO_USERNAME, MONGO_PASSWORD, MONGO_CLUSTER]):
         raise ValueError("❌ Missing MongoDB environment variables")
-    MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
 
+    MONGO_URI = (
+        f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}"
+        f"@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
+    )
+
+# ✅ Initialize globals but connect on startup
 client_mongo: AsyncIOMotorClient = None
 db = None
 whatsapp_collection = None
-
 
 @app.on_event("startup")
 async def startup_db_client():
@@ -49,13 +54,12 @@ async def startup_db_client():
     client_mongo = AsyncIOMotorClient(MONGO_URI)
     db = client_mongo["chatbot"]
     whatsapp_collection = db["whatsapp_messages"]
-    print("✅ MongoDB connection established")
-
+    print("✅ MongoDB connection established in app.py")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client_mongo.close()
-    print("❌ MongoDB connection closed")
+    print("❌ MongoDB connection closed in app.py")
 
 # ---------------- OPENAI ----------------
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -66,7 +70,11 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 def detect_sentiment(message: str):
     polarity = TextBlob(message).sentiment.polarity
-    return "positive" if polarity > 0.2 else "negative" if polarity < -0.2 else "neutral"
+    if polarity > 0.2:
+        return "positive"
+    elif polarity < -0.2:
+        return "negative"
+    return "neutral"
 
 def parse_messages(lines, your_name="CHIMA KALU-ORJI"):
     messages = []
@@ -126,18 +134,25 @@ async def upload_whatsapp(title: str = Form(...), file: UploadFile = File(...)):
     else:
         doc = {"title": title, "messages": messages, "autoReply": False}
         result = await whatsapp_collection.insert_one(doc)
-        return {"status": "created", "id": str(result.inserted_id), "title": title, "messages_count": len(messages), "autoReply": False}
+        return {
+            "status": "created",
+            "id": str(result.inserted_id),
+            "title": title,
+            "messages_count": len(messages),
+            "autoReply": False
+        }
 
 @app.get("/whatsapp")
 async def get_all_whatsapp():
     try:
         docs = await whatsapp_collection.find().to_list(length=None)
         for doc in docs:
-            doc["_id"] = str(doc["_id"])  # Convert ObjectId for JSON
+            doc["_id"] = str(doc["_id"])
         return docs
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chats: {str(e)}")
 
+# ---------------- CHAT ----------------
 class QueryRequest(BaseModel):
     id: str
     message: str
@@ -173,6 +188,7 @@ async def chat_endpoint(req: QueryRequest):
         "bot_reply": resp.choices[0].message.content
     }
 
+# ---------------- TRAIN ----------------
 @app.post("/train/{doc_id}")
 async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(start_training, doc_id)
@@ -186,6 +202,7 @@ async def get_training_status(job_id: str):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+# ---------------- AUTO-REPLY ----------------
 @app.put("/patterns/{pattern_id}/autoreply")
 async def update_auto_reply(pattern_id: str, status: bool):
     try:
@@ -196,7 +213,3 @@ async def update_auto_reply(pattern_id: str, status: bool):
         return {"success": result.modified_count == 1, "autoReply": status}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update autoReply: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8001, reload=True)
