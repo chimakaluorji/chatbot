@@ -10,7 +10,20 @@ from textblob import TextBlob  # ✅ for sentiment
 load_dotenv()
 
 # ---------------- MONGO CONNECTION ----------------
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
 MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    MONGO_USERNAME = os.getenv("MONGO_USERNAME")
+    MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")
+    MONGO_CLUSTER = os.getenv("MONGO_CLUSTER")
+    if not all([MONGO_USERNAME, MONGO_PASSWORD, MONGO_CLUSTER]):
+        raise ValueError("❌ Missing MongoDB environment variables")
+    MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
+
 client_mongo = AsyncIOMotorClient(MONGO_URI)
 db = client_mongo["chatbot"]
 whatsapp_collection = db["whatsapp_messages"]
