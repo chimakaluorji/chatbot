@@ -6,3 +6,4 @@ textblob
 python-dotenv
 aiofiles
 requests
+python-multipart
