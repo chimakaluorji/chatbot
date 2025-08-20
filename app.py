@@ -28,7 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- MONGO (initialized on startup) ----------------
+# ---------------- MONGO (safe connection helper) ----------------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     MONGO_USERNAME = os.getenv("MONGO_USERNAME")
@@ -38,24 +38,13 @@ if not MONGO_URI:
         raise ValueError("❌ Missing MongoDB environment variables")
     MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
 
-client_mongo: AsyncIOMotorClient = None
-db = None
-whatsapp_collection = None
-
-
-@app.on_event("startup")
-async def startup_db_client():
-    global client_mongo, db, whatsapp_collection
-    client_mongo = AsyncIOMotorClient(MONGO_URI)
-    db = client_mongo["chatbot"]
-    whatsapp_collection = db["whatsapp_messages"]
-    print("✅ MongoDB connection established")
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client_mongo.close()
-    print("❌ MongoDB connection closed")
+_client = None
+def get_collection():
+    global _client
+    if _client is None:
+        _client = AsyncIOMotorClient(MONGO_URI)
+    db = _client["chatbot"]
+    return db["whatsapp_messages"]
 
 # ---------------- OPENAI ----------------
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -96,6 +85,7 @@ def parse_messages(lines, your_name="CHIMA KALU-ORJI"):
 # ---------------- ROUTES ----------------
 @app.post("/whatsapp")
 async def upload_whatsapp(title: str = Form(...), file: UploadFile = File(...)):
+    whatsapp_collection = get_collection()
     filename = f"{int(time.time())}{Path(file.filename).suffix}"
     file_path = UPLOAD_DIR / filename
 
@@ -131,6 +121,7 @@ async def upload_whatsapp(title: str = Form(...), file: UploadFile = File(...)):
 @app.get("/whatsapp")
 async def get_all_whatsapp():
     try:
+        whatsapp_collection = get_collection()
         docs = await whatsapp_collection.find().to_list(length=None)
         for doc in docs:
             doc["_id"] = str(doc["_id"])  # Convert ObjectId for JSON
@@ -144,6 +135,7 @@ class QueryRequest(BaseModel):
 
 @app.post("/chat")
 async def chat_endpoint(req: QueryRequest):
+    whatsapp_collection = get_collection()
     doc = await whatsapp_collection.find_one({"_id": ObjectId(req.id)})
     if not doc or "FINE_TUNED_MODEL_ID" not in doc:
         raise HTTPException(status_code=400, detail="No trained model available")
@@ -189,6 +181,7 @@ async def get_training_status(job_id: str):
 @app.put("/patterns/{pattern_id}/autoreply")
 async def update_auto_reply(pattern_id: str, status: bool):
     try:
+        whatsapp_collection = get_collection()
         result = await whatsapp_collection.update_one(
             {"_id": ObjectId(pattern_id)},
             {"$set": {"autoReply": status}}
@@ -197,6 +190,7 @@ async def update_auto_reply(pattern_id: str, status: bool):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update autoReply: {str(e)}")
 
+# ---------------- LOCAL TEST ENTRY ----------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
