@@ -7,7 +7,7 @@
     },
     "api/train.py": {
       "runtime": "python3.9",
-      "maxDuration": 900
+      "maxDuration": 300
     }
   },
   "routes": [
