@@ -123,14 +123,22 @@ async def get_all_whatsapp():
         chats.append(doc)
     return chats
 
-class QueryRequest(BaseModel):
+class ChatRequest(BaseModel):
+    id: str   # The document ID from Mongo
     message: str
-
+    
 @app.post("/chat")
-async def chat_endpoint(req: QueryRequest):
-    if not FINE_TUNED_MODEL_ID:
-        raise HTTPException(status_code=400, detail="No trained model available")
+async def chat_endpoint(req: ChatRequest):
+    # 1. Find document in MongoDB
+    doc = await whatsapp_collection.find_one({"_id": ObjectId(req.id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
 
+    fine_tuned_model_id = doc.get("FINE_TUNED_MODEL_ID")
+    if not fine_tuned_model_id:
+        raise HTTPException(status_code=400, detail="No trained model available for this document")
+
+    # 2. Detect sentiment
     sentiment = detect_sentiment(req.message)
     system_prompt = (
         f"You are Chima’s WhatsApp auto-reply bot.\n"
@@ -138,13 +146,25 @@ async def chat_endpoint(req: QueryRequest):
         "Always produce new, natural, human-like responses.\n"
     )
 
+    # 3. Query OpenAI with this doc’s fine-tuned model
     resp = openai_client.chat.completions.create(
-        model=FINE_TUNED_MODEL_ID,
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": req.message}],
+        model=fine_tuned_model_id,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": req.message}
+        ],
         max_completion_tokens=200
     )
 
-    return {"status": "success", "sentiment": sentiment, "user_message": req.message, "bot_reply": resp.choices[0].message.content}
+    # 4. Return response
+    return {
+        "status": "success",
+        "doc_id": req.id,
+        "sentiment": sentiment,
+        "user_message": req.message,
+        "bot_reply": resp.choices[0].message.content
+    }
+
 
 @app.post("/train/{doc_id}")
 async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
