@@ -12,33 +12,50 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from openai import OpenAI
 from bson import ObjectId
-from train import start_training, check_training_status  # ✅ use train.py functions
+from train import start_training, check_training_status  # ✅ import from train.py
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
+
 app = FastAPI()
 
 # ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 🔒 lock down in production
+    allow_origins=["*"],  # ⚠️ In production, restrict this
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- MONGO ----------------
-MONGO_USERNAME = os.getenv("MONGO_USERNAME")
-MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")
-MONGO_CLUSTER = os.getenv("MONGO_CLUSTER")
+# ---------------- MONGO (initialized on startup) ----------------
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    MONGO_USERNAME = os.getenv("MONGO_USERNAME")
+    MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")
+    MONGO_CLUSTER = os.getenv("MONGO_CLUSTER")
+    if not all([MONGO_USERNAME, MONGO_PASSWORD, MONGO_CLUSTER]):
+        raise ValueError("❌ Missing MongoDB environment variables")
+    MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
 
-if not all([MONGO_USERNAME, MONGO_PASSWORD, MONGO_CLUSTER]):
-    raise ValueError("❌ Missing MongoDB environment variables")
+client_mongo: AsyncIOMotorClient = None
+db = None
+whatsapp_collection = None
 
-MONGO_URI = f"mongodb+srv://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
-client_mongo = AsyncIOMotorClient(MONGO_URI)
-db = client_mongo["chatbot"]
-whatsapp_collection = db["whatsapp_messages"]
+
+@app.on_event("startup")
+async def startup_db_client():
+    global client_mongo, db, whatsapp_collection
+    client_mongo = AsyncIOMotorClient(MONGO_URI)
+    db = client_mongo["chatbot"]
+    whatsapp_collection = db["whatsapp_messages"]
+    print("✅ MongoDB connection established")
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client_mongo.close()
+    print("❌ MongoDB connection closed")
 
 # ---------------- OPENAI ----------------
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -116,12 +133,11 @@ async def get_all_whatsapp():
     try:
         docs = await whatsapp_collection.find().to_list(length=None)
         for doc in docs:
-            doc["_id"] = str(doc["_id"])
+            doc["_id"] = str(doc["_id"])  # Convert ObjectId for JSON
         return docs
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chats: {str(e)}")
 
-# ---------------- CHAT ----------------
 class QueryRequest(BaseModel):
     id: str
     message: str
@@ -157,18 +173,19 @@ async def chat_endpoint(req: QueryRequest):
         "bot_reply": resp.choices[0].message.content
     }
 
-# ---------------- TRAIN ----------------
 @app.post("/train/{doc_id}")
 async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
-    background_tasks.add_task(start_training, doc_id)  # ✅ non-blocking
+    background_tasks.add_task(start_training, doc_id)
     return {"status": "started", "doc_id": doc_id}
 
 @app.get("/train/status/{job_id}")
 async def get_training_status(job_id: str):
-    result = await check_training_status(job_id)
-    return result
+    try:
+        result = await check_training_status(job_id)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-# ---------------- AUTO REPLY ----------------
 @app.put("/patterns/{pattern_id}/autoreply")
 async def update_auto_reply(pattern_id: str, status: bool):
     try:

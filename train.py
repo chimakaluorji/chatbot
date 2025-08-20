@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from openai import OpenAI
 from textblob import TextBlob  # ✅ for sentiment
+from fastapi import FastAPI
+
+# ---------------- FASTAPI APP ----------------
+app = FastAPI()
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -24,9 +28,23 @@ if not MONGO_URI:
         f"@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
     )
 
-client_mongo = AsyncIOMotorClient(MONGO_URI)
-db = client_mongo["chatbot"]
-whatsapp_collection = db["whatsapp_messages"]
+# ---------------- GLOBAL VARS ----------------
+client_mongo: AsyncIOMotorClient = None
+db = None
+whatsapp_collection = None
+
+@app.on_event("startup")
+async def startup_db_client():
+    global client_mongo, db, whatsapp_collection
+    client_mongo = AsyncIOMotorClient(MONGO_URI)
+    db = client_mongo["chatbot"]
+    whatsapp_collection = db["whatsapp_messages"]
+    print("✅ MongoDB connection established in train.py")
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client_mongo.close()
+    print("❌ MongoDB connection closed in train.py")
 
 # ---------------- OPENAI CLIENT ----------------
 client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
