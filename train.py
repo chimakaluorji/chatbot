@@ -1,4 +1,4 @@
-# train.py
+# train.py 
 import os
 import json
 from bson import ObjectId
@@ -6,14 +6,11 @@ from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from openai import OpenAI
 from textblob import TextBlob  # ✅ for sentiment
-from fastapi import FastAPI
-
-# ---------------- FASTAPI APP ----------------
-app = FastAPI()
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
 
+# ---------------- MONGO SETUP ----------------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     MONGO_USERNAME = os.getenv("MONGO_USERNAME")
@@ -28,23 +25,9 @@ if not MONGO_URI:
         f"@{MONGO_CLUSTER}/?retryWrites=true&w=majority"
     )
 
-# ---------------- GLOBAL VARS ----------------
-client_mongo: AsyncIOMotorClient = None
-db = None
-whatsapp_collection = None
-
-@app.on_event("startup")
-async def startup_db_client():
-    global client_mongo, db, whatsapp_collection
-    client_mongo = AsyncIOMotorClient(MONGO_URI)
-    db = client_mongo["chatbot"]
-    whatsapp_collection = db["whatsapp_messages"]
-    print("✅ MongoDB connection established in train.py")
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client_mongo.close()
-    print("❌ MongoDB connection closed in train.py")
+_client = AsyncIOMotorClient(MONGO_URI)
+db = _client["chatbot"]
+whatsapp_collection = db["whatsapp_messages"]
 
 # ---------------- OPENAI CLIENT ----------------
 client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -59,28 +42,60 @@ def detect_sentiment(message: str):
     else:
         return "neutral"
 
+# ---------------- MODERATION ----------------
+def is_safe_text(text: str) -> bool:
+    """
+    Check if text passes OpenAI moderation.
+    Returns True if safe, False if flagged.
+    """
+    if not text.strip():
+        return True  # skip empty
+    try:
+        resp = client_openai.moderations.create(
+            model="omni-moderation-latest",
+            input=text
+        )
+        flagged = resp.results[0].flagged
+        return not flagged
+    except Exception as e:
+        print(f"⚠️ Moderation API error: {e}")
+        return False  # be safe, reject on error
+
 # ---------------- JSONL CREATION ----------------
 def prepare_jsonl_from_db(messages, jsonl_file: str):
     """
     Convert stored DB messages into JSONL format for fine-tuning.
+    Expects flat list of {role, content} objects.
+    Applies moderation filtering.
     """
     data = []
-    for msg in messages:  # expects flattened [system, user, assistant]
-        incoming = msg[1]["content"] if len(msg) > 1 else ""
-        reply = msg[2]["content"] if len(msg) > 2 else ""
-        sentiment = detect_sentiment(incoming)
+
+    # group messages as [system, user, assistant]
+    for i in range(0, len(messages), 3):
+        chunk = messages[i:i+3]
+        if len(chunk) < 3:
+            continue  # skip incomplete triplets
+
+        system_msg, user_msg, assistant_msg = chunk
+
+        # ✅ Moderation filter
+        if not (is_safe_text(user_msg["content"]) and is_safe_text(assistant_msg["content"])):
+            print(f"⛔ Skipping unsafe conversation: {user_msg['content']} / {assistant_msg['content']}")
+            continue
+
+        sentiment = detect_sentiment(user_msg["content"])
 
         system_prompt = (
             "You are Chima’s WhatsApp auto-reply bot. "
             "Mimic his tone, style, and way of speaking based on chat history. "
-            f" The incoming message is {sentiment}."
+            f"The incoming message is {sentiment}."
         )
 
         record = {
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": incoming},
-                {"role": "assistant", "content": reply},
+                {"role": "user", "content": user_msg["content"]},
+                {"role": "assistant", "content": assistant_msg["content"]},
             ]
         }
         data.append(record)
@@ -101,7 +116,7 @@ async def start_training(doc_id: str):
     if not doc or "messages" not in doc:
         return {"error": "No training data found"}
 
-    # Write messages to JSONL
+    # Write messages to JSONL (with moderation applied)
     jsonl_file = "whatsapp_finetune.jsonl"
     prepare_jsonl_from_db(doc["messages"], jsonl_file)
 
@@ -112,7 +127,7 @@ async def start_training(doc_id: str):
     # Start fine-tune
     job = client_openai.fine_tuning.jobs.create(
         training_file=uploaded.id,
-        model="gpt-4.1-nano-2025-04-14",  # ✅ latest requested model
+        model="gpt-4.1-nano-2025-04-14",  # ✅ latest model
     )
 
     # Save job_id to DB for later polling

@@ -12,7 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from openai import OpenAI
 from bson import ObjectId
-from train import start_training, check_training_status  # ✅ import from train.py
+from train import start_training, check_training_status 
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -22,7 +22,7 @@ app = FastAPI()
 # ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ In production, restrict this
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,11 +80,25 @@ def parse_messages(lines, your_name="CHIMA KALU-ORJI"):
                     {"role": "user", "content": text.strip()},
                     {"role": "assistant", "content": next_text.strip()}
                 ])
-    return messages
+
+    # ✅ Ensure the result is always a flat list of dicts
+    flat_messages = []
+    for item in messages:
+        if isinstance(item, list):
+            flat_messages.extend(item)
+        else:
+            flat_messages.append(item)
+    return flat_messages
 
 # ---------------- ROUTES ----------------
 @app.post("/whatsapp")
-async def upload_whatsapp(title: str = Form(...), file: UploadFile = File(...)):
+async def upload_whatsapp(
+    title: str = Form(...),
+    assistant: str = Form(...),
+    user: str = Form(...),
+    fine_tuned_model_id: str = Form(None),
+    file: UploadFile = File(...)
+):
     whatsapp_collection = get_collection()
     filename = f"{int(time.time())}{Path(file.filename).suffix}"
     file_path = UPLOAD_DIR / filename
@@ -101,6 +115,7 @@ async def upload_whatsapp(title: str = Form(...), file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading uploaded file: {str(e)}")
 
+    # ✅ Fix: only assign messages, not tuple
     messages = parse_messages(lines)
     if not messages:
         raise HTTPException(status_code=400, detail="No valid messages found in file.")
@@ -110,13 +125,45 @@ async def upload_whatsapp(title: str = Form(...), file: UploadFile = File(...)):
     if existing_doc:
         await whatsapp_collection.update_one(
             {"_id": existing_doc["_id"]},
-            {"$push": {"messages": {"$each": messages}}, "$set": {"autoReply": False}}
+            {
+                "$push": {"messages": {"$each": messages}},
+                "$set": {
+                    "assistant": assistant,
+                    "user": user,
+                    "FINE_TUNED_MODEL_ID": fine_tuned_model_id,
+                    "autoReply": False
+                }
+            }
         )
-        return {"status": "updated", "title": title, "new_messages": len(messages), "autoReply": False}
+        return {
+            "status": "updated",
+            "title": title,
+            "new_messages": len(messages),
+            "assistant": assistant,
+            "user": user,
+            "FINE_TUNED_MODEL_ID": fine_tuned_model_id,
+            "autoReply": False
+        }
     else:
-        doc = {"title": title, "messages": messages, "autoReply": False}
+        doc = {
+            "title": title,
+            "assistant": assistant,
+            "user": user,
+            "messages": messages,
+            "autoReply": False,
+            "FINE_TUNED_MODEL_ID": fine_tuned_model_id
+        }
         result = await whatsapp_collection.insert_one(doc)
-        return {"status": "created", "id": str(result.inserted_id), "title": title, "messages_count": len(messages), "autoReply": False}
+        return {
+            "status": "created",
+            "id": str(result.inserted_id),
+            "title": title,
+            "messages_count": len(messages),
+            "assistant": assistant,
+            "user": user,
+            "FINE_TUNED_MODEL_ID": fine_tuned_model_id,
+            "autoReply": False
+        }
 
 @app.get("/whatsapp")
 async def get_all_whatsapp():
@@ -186,9 +233,15 @@ async def update_auto_reply(pattern_id: str, status: bool):
             {"_id": ObjectId(pattern_id)},
             {"$set": {"autoReply": status}}
         )
-        return {"success": result.modified_count == 1, "autoReply": status}
+        return {
+            "success": result.modified_count == 1,
+            "autoReply": status
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update autoReply: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update autoReply: {str(e)}"
+        )
 
 # ---------------- LOCAL TEST ENTRY ----------------
 if __name__ == "__main__":
