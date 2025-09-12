@@ -213,9 +213,12 @@ async def chat_endpoint(req: QueryRequest):
     }
 
 @app.post("/train/{doc_id}")
-async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
-    background_tasks.add_task(start_training, doc_id)
-    return {"status": "started", "doc_id": doc_id}
+async def trigger_training(doc_id: str):
+    """
+    Directly run training and return values from start_training.
+    """
+    result = await start_training(doc_id)
+    return result
 
 @app.get("/train/status/{job_id}")
 async def get_training_status(job_id: str):

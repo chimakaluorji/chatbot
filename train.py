@@ -127,7 +127,7 @@ async def start_training(doc_id: str):
     # Start fine-tune
     job = client_openai.fine_tuning.jobs.create(
         training_file=uploaded.id,
-        model="gpt-4.1-nano-2025-04-14",  # ✅ latest model
+        model="gpt-4.1-nano-2025-04-14",  # latest model
     )
 
     # Save job_id to DB for later polling
