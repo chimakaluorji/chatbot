@@ -53,7 +53,7 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-def detect_sentiment(message: str):
+def detect_sentiment(message: str) -> str:
     polarity = TextBlob(message).sentiment.polarity
     return "positive" if polarity > 0.2 else "negative" if polarity < -0.2 else "neutral"
 
@@ -115,7 +115,6 @@ async def upload_whatsapp(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading uploaded file: {str(e)}")
 
-    # ✅ Fix: only assign messages, not tuple
     messages = parse_messages(lines)
     if not messages:
         raise HTTPException(status_code=400, detail="No valid messages found in file.")
@@ -212,21 +211,51 @@ async def chat_endpoint(req: QueryRequest):
         "bot_reply": resp.choices[0].message.content
     }
 
+# ---------------- TRAINING ----------------
 @app.post("/train/{doc_id}")
-async def trigger_training(doc_id: str):
+async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
     """
-    Directly run training and return values from start_training.
+    Start fine-tuning in background, return doc_id immediately.
     """
-    result = await start_training(doc_id)
-    return result
+    background_tasks.add_task(start_training, doc_id)
+    return {"status": "started", "doc_id": doc_id}
 
-@app.get("/train/status/{job_id}")
-async def get_training_status(job_id: str):
+@app.get("/train/status/{doc_id}")
+async def get_training_status(doc_id: str):
+    """
+    Return job_id first (once available), then report queue/running/succeeded/failed.
+    """
     try:
-        result = await check_training_status(job_id)
-        return result
+        whatsapp_collection = get_collection()
+        doc = await whatsapp_collection.find_one({"_id": ObjectId(doc_id)})
+        if not doc:
+            return {"status": "error", "message": "Document not found"}
+
+        job_id = doc.get("fine_tune_job_id")
+        if not job_id:
+            return {"status": "pending", "job_id": None, "queue_position": None}
+
+        # ✅ Check job status if job_id exists
+        job_status = await check_training_status(job_id)
+
+        # Always include job_id
+        response = {"job_id": job_id, "status": job_status.get("status")}
+
+        # Add model_id if succeeded
+        if job_status.get("status") == "succeeded":
+            response["model_id"] = job_status.get("model_id")
+
+        # Add queue position if job still pending/queued
+        if job_status.get("status") == "pending" and "queue_position" in job_status:
+            response["queue_position"] = job_status["queue_position"]
+        else:
+            response["queue_position"] = None
+
+        return response
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 @app.put("/patterns/{pattern_id}/autoreply")
 async def update_auto_reply(pattern_id: str, status: bool):

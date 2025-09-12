@@ -155,7 +155,12 @@ async def check_training_status(job_id: str):
         )
         return {"status": "succeeded", "model_id": model_id}
 
+    elif status == "pending":
+        # include queue position if API provides it
+        return {"status": "pending", "queue_position": getattr(job, "queue_position", None)}
+
     elif status in ["failed", "cancelled"]:
         return {"status": status}
 
     return {"status": status}
+
