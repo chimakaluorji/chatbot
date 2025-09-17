@@ -6,14 +6,14 @@ import re
 from pathlib import Path
 from textblob import TextBlob
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from openai import OpenAI
 from bson import ObjectId
 from train import start_training, check_training_status
-from fastapi import Query, HTTPException
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -23,7 +23,7 @@ app = FastAPI()
 # ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # ⚠️ Restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,17 +81,22 @@ def parse_messages(lines, your_name="CHIMA KALU-ORJI"):
                     {"role": "user", "content": text.strip()},
                     {"role": "assistant", "content": next_text.strip()}
                 ])
+    return messages
 
-    flat_messages = []
-    for item in messages:
-        if isinstance(item, list):
-            flat_messages.extend(item)
-        else:
-            flat_messages.append(item)
-    return flat_messages
-
+def serialize_doc(doc):
+    return {
+        "_id": str(doc["_id"]),
+        "title": doc.get("title"),
+        "assistant": doc.get("assistant"),
+        "user": doc.get("user"),
+        "messages_count": len(doc.get("messages", [])),
+        "autoReply": doc.get("autoReply", False),
+        "fine_tune_job_id": doc.get("fine_tune_job_id"),
+        "fine_tuned_model_id": doc.get("fine_tuned_model_id"),
+    }
 
 # ---------------- ROUTES ----------------
+
 @app.post("/whatsapp")
 async def upload_whatsapp(
     title: str = Form(...),
@@ -159,7 +164,7 @@ async def upload_whatsapp(
         result = await whatsapp_collection.insert_one(doc)
         return {
             "status": "created",
-            "id": str(result.inserted_id),
+            "_id": str(result.inserted_id),
             "title": title,
             "messages_count": len(messages),
             "assistant": assistant,
@@ -168,22 +173,25 @@ async def upload_whatsapp(
             "autoReply": False
         }
 
-
+@app.get("/whatsapp")
+async def get_patterns():
+    try:
+        whatsapp_collection = get_collection()
+        docs = await whatsapp_collection.find().to_list(length=None)
+        normalized = [serialize_doc(doc) for doc in docs]
+        return JSONResponse(content=normalized, status_code=200)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching chats: {str(e)}")
 
 @app.get("/whatsapp/autoreply")
 async def get_user_autoreply(user: str = Query(..., description="Sender/user name")):
-    """
-    Get autoReply status for a given user.
-    """
     try:
         whatsapp_collection = get_collection()
         doc = await whatsapp_collection.find_one({"user": user})
-
         if not doc:
             raise HTTPException(status_code=404, detail=f"No record found for user {user}")
-
         return {
-            "_id": str(doc["_id"]),  # ✅ Convert ObjectId to string
+            "_id": str(doc["_id"]),
             "user": user,
             "autoReply": doc.get("autoReply", False),
             "fine_tuned_model_id": doc.get("fine_tuned_model_id"),
@@ -192,17 +200,15 @@ async def get_user_autoreply(user: str = Query(..., description="Sender/user nam
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching autoReply: {str(e)}")
 
-    
 class QueryRequest(BaseModel):
     id: str
     message: str
-
 
 @app.post("/chat")
 async def chat_endpoint(req: QueryRequest):
     whatsapp_collection = get_collection()
     doc = await whatsapp_collection.find_one({"_id": ObjectId(req.id)})
-    if not doc or "fine_tuned_model_id" not in doc or not doc["fine_tuned_model_id"]:
+    if not doc or not doc.get("fine_tuned_model_id"):
         raise HTTPException(status_code=400, detail="No trained model available")
 
     model_id = doc["fine_tuned_model_id"]
@@ -230,7 +236,6 @@ async def chat_endpoint(req: QueryRequest):
         "bot_reply": resp.choices[0].message.content
     }
 
-# ---------------- TRAINING ----------------
 @app.post("/train/{doc_id}")
 async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(start_training, doc_id)
@@ -296,15 +301,9 @@ async def update_auto_reply(pattern_id: str, status: bool):
             {"_id": ObjectId(pattern_id)},
             {"$set": {"autoReply": status}}
         )
-        return {
-            "success": result.modified_count == 1,
-            "autoReply": status
-        }
+        return {"success": result.modified_count == 1, "autoReply": status}
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to update autoReply: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to update autoReply: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
