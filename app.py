@@ -12,7 +12,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from openai import OpenAI
 from bson import ObjectId
-from train import start_training, check_training_status 
+from train import start_training, check_training_status
+from fastapi import Query, HTTPException
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -22,13 +23,13 @@ app = FastAPI()
 # ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- MONGO (safe connection helper) ----------------
+# ---------------- MONGO ----------------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     MONGO_USERNAME = os.getenv("MONGO_USERNAME")
@@ -81,7 +82,6 @@ def parse_messages(lines, your_name="CHIMA KALU-ORJI"):
                     {"role": "assistant", "content": next_text.strip()}
                 ])
 
-    # ✅ Ensure the result is always a flat list of dicts
     flat_messages = []
     for item in messages:
         if isinstance(item, list):
@@ -89,6 +89,7 @@ def parse_messages(lines, your_name="CHIMA KALU-ORJI"):
         else:
             flat_messages.append(item)
     return flat_messages
+
 
 # ---------------- ROUTES ----------------
 @app.post("/whatsapp")
@@ -108,7 +109,7 @@ async def upload_whatsapp(
         content = await file.read()
         await f.write(content)
 
-    # Parse file
+    # Read lines
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -119,38 +120,41 @@ async def upload_whatsapp(
     if not messages:
         raise HTTPException(status_code=400, detail="No valid messages found in file.")
 
-    # Insert/update DB
-    existing_doc = await whatsapp_collection.find_one({"title": title})
+    # 🔹 Check by BOTH title and user
+    existing_doc = await whatsapp_collection.find_one({"title": title, "user": user})
+
     if existing_doc:
+        # Update existing doc (append messages + update metadata)
         await whatsapp_collection.update_one(
             {"_id": existing_doc["_id"]},
             {
                 "$push": {"messages": {"$each": messages}},
                 "$set": {
                     "assistant": assistant,
-                    "user": user,
-                    "FINE_TUNED_MODEL_ID": fine_tuned_model_id,
+                    "fine_tuned_model_id": fine_tuned_model_id,
                     "autoReply": False
                 }
             }
         )
         return {
             "status": "updated",
+            "_id": str(existing_doc["_id"]),
             "title": title,
             "new_messages": len(messages),
             "assistant": assistant,
             "user": user,
-            "FINE_TUNED_MODEL_ID": fine_tuned_model_id,
+            "fine_tuned_model_id": fine_tuned_model_id,
             "autoReply": False
         }
     else:
+        # Insert new doc
         doc = {
             "title": title,
             "assistant": assistant,
             "user": user,
             "messages": messages,
             "autoReply": False,
-            "FINE_TUNED_MODEL_ID": fine_tuned_model_id
+            "fine_tuned_model_id": fine_tuned_model_id
         }
         result = await whatsapp_collection.insert_one(doc)
         return {
@@ -160,21 +164,35 @@ async def upload_whatsapp(
             "messages_count": len(messages),
             "assistant": assistant,
             "user": user,
-            "FINE_TUNED_MODEL_ID": fine_tuned_model_id,
+            "fine_tuned_model_id": fine_tuned_model_id,
             "autoReply": False
         }
 
-@app.get("/whatsapp")
-async def get_all_whatsapp():
+
+
+@app.get("/whatsapp/autoreply")
+async def get_user_autoreply(user: str = Query(..., description="Sender/user name")):
+    """
+    Get autoReply status for a given user.
+    """
     try:
         whatsapp_collection = get_collection()
-        docs = await whatsapp_collection.find().to_list(length=None)
-        for doc in docs:
-            doc["_id"] = str(doc["_id"])  # Convert ObjectId for JSON
-        return docs
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching chats: {str(e)}")
+        doc = await whatsapp_collection.find_one({"user": user})
 
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"No record found for user {user}")
+
+        return {
+            "_id": str(doc["_id"]),  # ✅ Convert ObjectId to string
+            "user": user,
+            "autoReply": doc.get("autoReply", False),
+            "fine_tuned_model_id": doc.get("fine_tuned_model_id"),
+            "fine_tune_job_id": doc.get("fine_tune_job_id"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching autoReply: {str(e)}")
+
+    
 class QueryRequest(BaseModel):
     id: str
     message: str
@@ -183,10 +201,10 @@ class QueryRequest(BaseModel):
 async def chat_endpoint(req: QueryRequest):
     whatsapp_collection = get_collection()
     doc = await whatsapp_collection.find_one({"_id": ObjectId(req.id)})
-    if not doc or "FINE_TUNED_MODEL_ID" not in doc:
+    if not doc or "fine_tuned_model_id" not in doc or not doc["fine_tuned_model_id"]:
         raise HTTPException(status_code=400, detail="No trained model available")
 
-    model_id = doc["FINE_TUNED_MODEL_ID"]
+    model_id = doc["fine_tuned_model_id"]
 
     sentiment = detect_sentiment(req.message)
     system_prompt = (
@@ -214,17 +232,11 @@ async def chat_endpoint(req: QueryRequest):
 # ---------------- TRAINING ----------------
 @app.post("/train/{doc_id}")
 async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
-    """
-    Start fine-tuning in background, return doc_id immediately.
-    """
     background_tasks.add_task(start_training, doc_id)
     return {"status": "started", "doc_id": doc_id}
 
 @app.get("/train/status/{doc_id}")
 async def get_training_status(doc_id: str):
-    """
-    Return job_id first (once available), then report queue/running/succeeded/failed.
-    """
     try:
         whatsapp_collection = get_collection()
         doc = await whatsapp_collection.find_one({"_id": ObjectId(doc_id)})
@@ -233,29 +245,47 @@ async def get_training_status(doc_id: str):
 
         job_id = doc.get("fine_tune_job_id")
         if not job_id:
-            return {"status": "pending", "job_id": None, "queue_position": None}
+            return {"status": "waiting_for_job_id", "job_id": None}
 
-        # ✅ Check job status if job_id exists
-        job_status = await check_training_status(job_id)
+        job = openai_client.fine_tuning.jobs.retrieve(job_id)
+        status = job.status
 
-        # Always include job_id
-        response = {"job_id": job_id, "status": job_status.get("status")}
+        if status == "pending":
+            return {
+                "status": "queued",
+                "job_id": job_id,
+                "queue_position": getattr(job, "queue_position", None),
+                "fine_tuned_model_id": doc.get("fine_tuned_model_id")
+            }
 
-        # Add model_id if succeeded
-        if job_status.get("status") == "succeeded":
-            response["model_id"] = job_status.get("model_id")
+        elif status == "succeeded":
+            model_id = job.fine_tuned_model
+            await whatsapp_collection.update_one(
+                {"_id": ObjectId(doc_id)},
+                {"$set": {"fine_tuned_model_id": model_id}}
+            )
+            return {
+                "status": "succeeded",
+                "job_id": job_id,
+                "fine_tuned_model_id": model_id
+            }
 
-        # Add queue position if job still pending/queued
-        if job_status.get("status") == "pending" and "queue_position" in job_status:
-            response["queue_position"] = job_status["queue_position"]
+        elif status in ["failed", "cancelled"]:
+            return {
+                "status": status,
+                "job_id": job_id,
+                "fine_tuned_model_id": None
+            }
+
         else:
-            response["queue_position"] = None
-
-        return response
+            return {
+                "status": "running",
+                "job_id": job_id,
+                "fine_tuned_model_id": doc.get("fine_tuned_model_id")
+            }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 @app.put("/patterns/{pattern_id}/autoreply")
 async def update_auto_reply(pattern_id: str, status: bool):
@@ -275,7 +305,6 @@ async def update_auto_reply(pattern_id: str, status: bool):
             detail=f"Failed to update autoReply: {str(e)}"
         )
 
-# ---------------- LOCAL TEST ENTRY ----------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)

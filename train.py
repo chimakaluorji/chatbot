@@ -1,4 +1,4 @@
-# train.py 
+# train.py
 import os
 import json
 from bson import ObjectId
@@ -59,7 +59,7 @@ def is_safe_text(text: str) -> bool:
         return not flagged
     except Exception as e:
         print(f"⚠️ Moderation API error: {e}")
-        return False  # be safe, reject on error
+        return False  # reject on error
 
 # ---------------- JSONL CREATION ----------------
 def prepare_jsonl_from_db(messages, jsonl_file: str):
@@ -70,11 +70,10 @@ def prepare_jsonl_from_db(messages, jsonl_file: str):
     """
     data = []
 
-    # group messages as [system, user, assistant]
     for i in range(0, len(messages), 3):
         chunk = messages[i:i+3]
         if len(chunk) < 3:
-            continue  # skip incomplete triplets
+            continue
 
         system_msg, user_msg, assistant_msg = chunk
 
@@ -84,7 +83,6 @@ def prepare_jsonl_from_db(messages, jsonl_file: str):
             continue
 
         sentiment = detect_sentiment(user_msg["content"])
-
         system_prompt = (
             "You are Chima’s WhatsApp auto-reply bot. "
             "Mimic his tone, style, and way of speaking based on chat history. "
@@ -110,57 +108,52 @@ def prepare_jsonl_from_db(messages, jsonl_file: str):
 async def start_training(doc_id: str):
     """
     Start a fine-tuning job for the given document.
-    Returns job_id immediately.
+    Saves job_id to DB.
     """
     doc = await whatsapp_collection.find_one({"_id": ObjectId(doc_id)})
     if not doc or "messages" not in doc:
         return {"error": "No training data found"}
 
-    # Write messages to JSONL (with moderation applied)
     jsonl_file = "whatsapp_finetune.jsonl"
     prepare_jsonl_from_db(doc["messages"], jsonl_file)
 
-    # Upload training file
     with open(jsonl_file, "rb") as f:
         uploaded = client_openai.files.create(file=f, purpose="fine-tune")
 
-    # Start fine-tune
     job = client_openai.fine_tuning.jobs.create(
         training_file=uploaded.id,
-        model="gpt-4.1-nano-2025-04-14",  # latest model
+        model="gpt-4.1-nano-2025-04-14"
     )
 
-    # Save job_id to DB for later polling
     await whatsapp_collection.update_one(
         {"_id": ObjectId(doc_id)},
         {"$set": {"fine_tune_job_id": job.id}},
     )
 
+    print(f"✅ Saved fine_tune_job_id={job.id} for doc_id={doc_id}")
     return {"status": "started", "job_id": job.id}
 
 # ---------------- CHECK STATUS ----------------
 async def check_training_status(job_id: str):
     """
-    Poll the fine-tuning job status.
-    If finished, update DB with fine-tuned model ID.
+    Check status of a fine-tune job via OpenAI.
     """
     job = client_openai.fine_tuning.jobs.retrieve(job_id)
     status = job.status
 
-    if status == "succeeded":
+    if status == "pending":
+        return {
+            "status": "queued",
+            "queue_position": getattr(job, "queue_position", None)
+        }
+    elif status == "succeeded":
         model_id = job.fine_tuned_model
         await whatsapp_collection.update_one(
             {"fine_tune_job_id": job_id},
             {"$set": {"FINE_TUNED_MODEL_ID": model_id}},
         )
         return {"status": "succeeded", "model_id": model_id}
-
-    elif status == "pending":
-        # include queue position if API provides it
-        return {"status": "pending", "queue_position": getattr(job, "queue_position", None)}
-
     elif status in ["failed", "cancelled"]:
         return {"status": status}
-
-    return {"status": status}
-
+    else:
+        return {"status": "running"}
