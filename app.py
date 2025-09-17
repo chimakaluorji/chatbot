@@ -236,62 +236,57 @@ async def chat_endpoint(req: QueryRequest):
         "bot_reply": resp.choices[0].message.content
     }
 
+
 @app.post("/train/{doc_id}")
-async def trigger_training(doc_id: str, background_tasks: BackgroundTasks):
-    background_tasks.add_task(start_training, doc_id)
-    return {"status": "started", "doc_id": doc_id}
+async def trigger_training(doc_id: str):
+    """
+    Start fine-tuning for a document.
+    Returns job_id + doc_id immediately.
+    """
+    try:
+        result = await start_training(doc_id)
+
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        return {
+            "status": "started",
+            "doc_id": doc_id,
+            "job_id": result["job_id"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start training: {str(e)}")
+
 
 @app.get("/train/status/{doc_id}")
 async def get_training_status(doc_id: str):
+    """
+    Check fine-tuning status for a given document.
+    Uses fine_tune_job_id saved in MongoDB.
+    """
     try:
         whatsapp_collection = get_collection()
         doc = await whatsapp_collection.find_one({"_id": ObjectId(doc_id)})
         if not doc:
-            return {"status": "error", "message": "Document not found"}
+            raise HTTPException(status_code=404, detail="Document not found")
 
         job_id = doc.get("fine_tune_job_id")
         if not job_id:
             return {"status": "waiting_for_job_id", "job_id": None}
 
-        job = openai_client.fine_tuning.jobs.retrieve(job_id)
-        status = job.status
+        # ✅ Call OpenAI API to get job status
+        result = await check_training_status(job_id)
 
-        if status == "pending":
-            return {
-                "status": "queued",
-                "job_id": job_id,
-                "queue_position": getattr(job, "queue_position", None),
-                "fine_tuned_model_id": doc.get("fine_tuned_model_id")
-            }
-
-        elif status == "succeeded":
-            model_id = job.fine_tuned_model
-            await whatsapp_collection.update_one(
-                {"_id": ObjectId(doc_id)},
-                {"$set": {"fine_tuned_model_id": model_id}}
-            )
-            return {
-                "status": "succeeded",
-                "job_id": job_id,
-                "fine_tuned_model_id": model_id
-            }
-
-        elif status in ["failed", "cancelled"]:
-            return {
-                "status": status,
-                "job_id": job_id,
-                "fine_tuned_model_id": None
-            }
-
-        else:
-            return {
-                "status": "running",
-                "job_id": job_id,
-                "fine_tuned_model_id": doc.get("fine_tuned_model_id")
-            }
+        # ✅ Merge MongoDB doc info for context
+        return {
+            "doc_id": doc_id,
+            "job_id": job_id,
+            "status": result.get("status"),
+            "fine_tuned_model_id": result.get("fine_tuned_model_id", doc.get("fine_tuned_model_id"))
+        }
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=f"Error checking training status: {str(e)}")
 
 @app.put("/patterns/{pattern_id}/autoreply")
 async def update_auto_reply(pattern_id: str, status: bool):
