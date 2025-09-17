@@ -197,6 +197,7 @@ class QueryRequest(BaseModel):
     id: str
     message: str
 
+
 @app.post("/chat")
 async def chat_endpoint(req: QueryRequest):
     whatsapp_collection = get_collection()
